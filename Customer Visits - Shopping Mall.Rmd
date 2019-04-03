@@ -1,0 +1,125 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r Read Data, echo=FALSE, message=FALSE, warning=FALSE}
+library(dplyr)
+visits <- read.csv('data/visits.csv')
+head(visits)
+```
+
+
+```{r Making data usable, echo=FALSE, message=FALSE, warning=FALSE}
+visits$visits <- trimws(as.character(visits$visits))
+visitsList <- parallel::mclapply(1:length(visits$visits), 
+                                 function(x)
+                                   as.integer(unlist(strsplit(visits$visits[x], " "))),
+                                 mc.cores = parallel::detectCores())
+dfOfVisitsList <- parallel::mclapply(1:length(visits$visits), 
+                                     function(x)
+                                       data.frame(x,visitsList[[x]]), 
+                                     mc.cores = parallel::detectCores())
+visits <- do.call("rbind", dfOfVisitsList)
+colnames(visits) <- c("visitor.id", "visit.day")
+rm(dfOfVisitsList, visitsList)
+head(visits)
+```
+
+```{r}
+visits$day.of.week <- as.integer(parallel::mclapply(visits$visit.day, 
+                                                    function(x) x %% 7, 
+                                                    mc.cores = parallel::detectCores()))
+visits$day.of.week[visits$day.of.week==0] <- as.integer(7)
+
+#week number + dummy days
+visits$week.number <- as.integer(floor((visits$visit.day - 1) / 7) + 1)
+dummy.days <- fastDummies::dummy_cols(visits$day.of.week)
+colnames(dummy.days) <- c("day.of.week", "Tue", "Sun", "Thu", "Sat", "Mon", "Fri", "Wed")
+visits <- cbind(visits, dummy.days[,2:8])
+rm(dummy.days)
+head(visits)
+```
+
+```{r Week wise data, echo=FALSE, message=FALSE, warning=FALSE}
+visits <- visits %>%
+  group_by(visitor.id, week.number) %>%
+  summarise(Mon = sum(Mon), 
+            Tue = sum(Tue),
+            Wed = sum(Wed),
+            Thu = sum(Thu),
+            Fri = sum(Fri),
+            Sat = sum(Sat),
+            Sun = sum(Sun))
+
+#non visit data
+complete.visits <- data.frame(visitor.id = rep(1:300000, 143), week.number = rep(1:143, 300000))
+complete.visits <- dplyr::full_join(complete.visits, visits, by = c('visitor.id', 'week.number'))
+complete.visits[is.na(complete.visits)] <- 0
+
+#visits per week
+complete.visits$total.visits.in.week <- rowSums(complete.visits[,3:9])
+
+complete.visits <- dplyr::mutate_all(complete.visits, 
+                                     function(x) as.integer(x))
+complete.visits <- as.data.frame(complete.visits)
+complete.visits <- complete.visits[with(complete.visits, order(visitor.id, week.number)), ]
+
+#frequency
+complete.visits <- complete.visits %>%
+  group_by(visitor.id) %>%
+  mutate(frequency = cumsum(total.visits.in.week))
+
+#remove visits before he first came
+complete.visits <- complete.visits %>%
+  filter(frequency != 0)
+
+#any visit that ever happened
+complete.visits$any.visit[complete.visits$total.visits.in.week>0] <- as.integer(1)
+complete.visits[is.na(complete.visits)] <- as.integer(0)
+
+#no visits
+complete.visits$no.visit <- as.integer(1 - complete.visits$any.visit)
+rm(visits)
+head(complete.visits)
+
+```
+
+
+```{r Proportions, echo=FALSE, message=FALSE, warning=FALSE}
+
+#weeks since prev visit
+complete.visits$weeks.since.visit <- sequence(rle((complete.visits$any.visit))$lengths)
+complete.visits$weeks.since.visit <- complete.visits$weeks.since.visit - complete.visits$any.visit
+
+#total day of week
+complete.visits <- complete.visits %>%
+  group_by(visitor.id) %>%
+  mutate(Tot.Mon = cumsum(Mon), 
+         Tot.Tue = cumsum(Tue),
+         Tot.Wed = cumsum(Wed),
+         Tot.Thu = cumsum(Thu),
+         Tot.Fri = cumsum(Fri),
+         Tot.Sat = cumsum(Sat),
+         Tot.Sun = cumsum(Sun),
+         Tot.no.visit = cumsum(no.visit))
+
+#proportions of visits
+complete.visits$prop.no.visit <- round(complete.visits$Tot.no.visit / (complete.visits$frequency +
+                                                                   complete.visits$Tot.no.visit), 2)
+complete.visits$prop.Sun <- round(complete.visits$Tot.Sun / complete.visits$frequency, 2)
+complete.visits$prop.Mon <- round(complete.visits$Tot.Mon / complete.visits$frequency, 2)
+complete.visits$prop.Tue <- round(complete.visits$Tot.Tue / complete.visits$frequency, 2)
+complete.visits$prop.Wed <- round(complete.visits$Tot.Wed / complete.visits$frequency, 2)
+complete.visits$prop.Thu <- round(complete.visits$Tot.Thu / complete.visits$frequency, 2)
+complete.visits$prop.Fri <- round(complete.visits$Tot.Fri / complete.visits$frequency, 2)
+complete.visits$prop.Sat <- round(complete.visits$Tot.Sat / complete.visits$frequency, 2)
+
+saveRDS(complete.visits, "data/complete.visits.ads.Rds")
+head(complete.visits)
+```
+
+
