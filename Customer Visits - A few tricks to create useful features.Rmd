@@ -1,0 +1,167 @@
+---
+title: "Customer Visits - A few tricks to create useful features"
+date: "April, 2019"
+output: 
+  html_document:
+    theme: cosmo
+    code_folding: hide
+    toc: yes
+    toc_float: true
+    toc_depth: 6
+    number_sections: false
+    fig_width: 8
+---
+
+# Introduction
+When you first look at the data, it's tempting to jump quickly to build a classification model by looking at past visits into the upcoming week. The results will look rather depressing. This is a very interesting problem that tests your skills not only in modeling but also in feature engineering.
+
+The dataset provides information about shopping mall visits of 300k customers over the course of 143 weeks. Each line represents one customer - the first column contains a unique customer identifier and the second column contains a vector of the day numbers he/she visited the mall. 
+
+The day with index 1 is a Monday (7 is a Sunday, 8 is again a Monday). Indices are within a range of 1 to 1001 (which is equal to 143 full weeks). The task is to predict the first day of the next visit (in week 144). 
+
+For instance, if a customer will visit the mall on a Wednesday, then the model should predict 3. We'll get to this detail later, perhaps in the modeling notebook.
+
+```{r Read Data, echo=FALSE, message=FALSE, warning=FALSE}
+library(dplyr)
+visits <- readRDS('data/visits.Rds')
+head(visits)
+```
+
+# Feature engineering
+The next stages will involve transforming the data into a format usable for modeling and create some interesting features that might explain a customer visit pattern.
+
+## Making a usable data frame
+The current data is not easy to understand for the computer. Let's first make it into a usable data frame. From the above table, you can notice that there is leading whitespace followed by a set of numbers separated by a space. Since we have to do this 300000 times, let's use the capability of all the cores to speed this up a little bit.
+
+```{r Making data usable, echo=FALSE, message=FALSE, warning=FALSE}
+visits$visits <- trimws(as.character(visits$visits))
+visitsList <- parallel::mclapply(1:length(visits$visits), 
+                                 function(x)
+                                   as.integer(unlist(strsplit(visits$visits[x], " "))),
+                                 mc.cores = parallel::detectCores())
+dfOfVisitsList <- parallel::mclapply(1:length(visits$visits), 
+                                     function(x)
+                                       data.frame(x,visitsList[[x]]), 
+                                     mc.cores = parallel::detectCores())
+visits <- do.call("rbind", dfOfVisitsList)
+colnames(visits) <- c("visitor.id", "visit.day")
+rm(dfOfVisitsList, visitsList)
+head(visits)
+```
+
+## Days of the week
+Let's convert the raw numbers to something more meaningful. Each day number is available to us. Let's create some interesting features - 
+1. Day of the week
+2. Week number
+3. Binary to indicate which day of the week a visit happened
+
+```{r}
+visits$day.of.week <- as.integer(parallel::mclapply(visits$visit.day, 
+                                                    function(x) x %% 7, 
+                                                    mc.cores = parallel::detectCores()))
+visits$day.of.week[visits$day.of.week==0] <- as.integer(7)
+
+visits$week.number <- as.integer(floor((visits$visit.day - 1) / 7) + 1)
+dummy.days <- fastDummies::dummy_cols(visits$day.of.week)
+colnames(dummy.days) <- c("day.of.week", "Tue", "Sun", "Thu", "Sat", "Mon", "Fri", "Wed")
+visits <- cbind(visits, dummy.days[,2:8])
+rm(dummy.days)
+head(visits)
+```
+
+## Visit patterns
+Now that we have customer visits, it's interesting to see which days are popular, and which days are important for non-visits. We want to understand how over time a customer visit pattern changes. It makes sense to look at the level of data at a customer-week level. Doing so will increase the size of the data substantially. So far looking at the data, all columns are numbers - no decimals. We can keep them as integers instead of numeric to save some memory.
+
+We'll derive the next set of features - 
+1. Visits by week-day level
+2. Non-visits data - We'll have to remove non-visits of a customer before he first visited. We wouldn't want our model to learn that.
+3. Total visits in a week
+4. Cumulative frequency of visits at a customer week level
+
+```{r Week wise data, echo=FALSE, message=FALSE, warning=FALSE}
+visits <- visits %>%
+  group_by(visitor.id, week.number) %>%
+  summarise(Mon = sum(Mon), 
+            Tue = sum(Tue),
+            Wed = sum(Wed),
+            Thu = sum(Thu),
+            Fri = sum(Fri),
+            Sat = sum(Sat),
+            Sun = sum(Sun))
+
+#non visit data
+complete.visits <- data.frame(visitor.id = rep(1:300000, 143), week.number = rep(1:143, 300000))
+complete.visits <- dplyr::full_join(complete.visits, visits, by = c('visitor.id', 'week.number'))
+complete.visits[is.na(complete.visits)] <- 0
+
+#visits per week
+complete.visits$total.visits.in.week <- rowSums(complete.visits[,3:9])
+
+complete.visits <- dplyr::mutate_all(complete.visits, 
+                                     function(x) as.integer(x))
+complete.visits <- as.data.frame(complete.visits)
+complete.visits <- complete.visits[with(complete.visits, order(visitor.id, week.number)), ]
+
+#frequency
+complete.visits <- complete.visits %>%
+  group_by(visitor.id) %>%
+  mutate(frequency = cumsum(total.visits.in.week))
+
+#remove visits before he first came
+complete.visits <- complete.visits %>%
+  filter(frequency != 0)
+
+#any visit that ever happened
+complete.visits$any.visit[complete.visits$total.visits.in.week>0] <- as.integer(1)
+complete.visits[is.na(complete.visits)] <- as.integer(0)
+
+#no visits
+complete.visits$no.visit <- as.integer(1 - complete.visits$any.visit)
+rm(visits)
+head(complete.visits)
+
+```
+
+## Proportions of visits, non-visits, gap
+Customers are likely to spike their visits to a shopping mall on weekends. Using the above let's look at how the proportions of visits have been changing with respect to days of the week. Understanding the intervisit interval is also important to understand when one is likely to visit.
+
+Key features below - 
+1. Weeks since the last visit
+2. Total visits/non-visits by day of the week
+3. Proportions of visits by day of the week
+
+```{r Proportions, echo=FALSE, message=FALSE, warning=FALSE}
+
+#weeks since prev visit
+complete.visits$weeks.since.visit <- sequence(rle((complete.visits$any.visit))$lengths)
+complete.visits$weeks.since.visit <- complete.visits$weeks.since.visit - complete.visits$any.visit
+
+#total day of week
+complete.visits <- complete.visits %>%
+  group_by(visitor.id) %>%
+  mutate(Tot.Mon = cumsum(Mon), 
+         Tot.Tue = cumsum(Tue),
+         Tot.Wed = cumsum(Wed),
+         Tot.Thu = cumsum(Thu),
+         Tot.Fri = cumsum(Fri),
+         Tot.Sat = cumsum(Sat),
+         Tot.Sun = cumsum(Sun),
+         Tot.no.visit = cumsum(no.visit))
+
+#proportions of visits
+complete.visits$prop.no.visit <- round(complete.visits$Tot.no.visit / (complete.visits$frequency +
+                                                                   complete.visits$Tot.no.visit), 2)
+complete.visits$prop.Sun <- round(complete.visits$Tot.Sun / complete.visits$frequency, 2)
+complete.visits$prop.Mon <- round(complete.visits$Tot.Mon / complete.visits$frequency, 2)
+complete.visits$prop.Tue <- round(complete.visits$Tot.Tue / complete.visits$frequency, 2)
+complete.visits$prop.Wed <- round(complete.visits$Tot.Wed / complete.visits$frequency, 2)
+complete.visits$prop.Thu <- round(complete.visits$Tot.Thu / complete.visits$frequency, 2)
+complete.visits$prop.Fri <- round(complete.visits$Tot.Fri / complete.visits$frequency, 2)
+complete.visits$prop.Sat <- round(complete.visits$Tot.Sat / complete.visits$frequency, 2)
+
+saveRDS(complete.visits, "data/complete.visits.ads.Rds")
+head(complete.visits)
+```
+
+# Next steps
+Let's keep a copy of this data set and start looking at the data a little better. It's not necessary that this entire dataset is required to be used in the modeling phase. We'll see what we can do about the same when we deep dive into the data.
