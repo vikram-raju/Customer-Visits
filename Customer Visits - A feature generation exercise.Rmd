@@ -1,0 +1,252 @@
+---
+title: "Customer Visits - A feature generation exercise"
+date: "April, 2019"
+output: 
+  html_document:
+    theme: cosmo
+    code_folding: hide
+    toc: yes
+    toc_float: true
+    toc_depth: 6
+    number_sections: false
+    fig_width: 8
+---
+
+# Introduction
+When you first look at the data, it's tempting to jump quickly to build a classification model by looking at past visits into the upcoming week. The results will look rather depressing. This is a very interesting problem that tests your skills not only in modeling but also in feature engineering.
+
+The data-set provides information about shopping mall visits of 300k customers over the course of 143 weeks. Each line represents one customer - the first column contains a unique customer identifier and the second column contains a vector of the day numbers he/she visited the mall. 
+
+The day with index 1 is a Monday (7 is a Sunday, 8 is again a Monday). Indices are within a range of 1 to 1001 (which is equal to 143 full weeks). The task is to predict the first day of the next visit (in week 144). 
+
+For instance, if a customer will visit the mall on a Wednesday, then the model should predict 3. We'll get to this detail later, perhaps in the modeling notebook.
+
+```{r Read Data, echo=FALSE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+visits <- readRDS('data/visits.Rds')
+head(visits)
+```
+
+# Data peek
+Let's look at the data to see what sense we can make out of it. The visits column basically has a character dump of all visits. We'll keep a list of vectors so we can use it to wrangle and create some new features.
+
+```{r Quick peek, echo=FALSE, message=FALSE, warning=FALSE}
+visits$visits <- trimws(as.character(visits$visits))
+visits$visits <- parallel::mclapply(1:length(visits$visits), 
+                                 function(x)
+                                   c(strsplit(visits$visits[x], " ")),
+                                 mc.cores = parallel::detectCores())
+visits$total.visits <- parallel::mclapply(1:length(visits$visits),
+                                          function(x)
+                                          length(as.integer(unlist(visits$visits[[x]]))))
+visits$monday.visits <- parallel::mclapply(1:length(visits$visits),
+                                          function(x)
+                                          sum((as.integer(unlist(visits$visits[[x]]))) %% 7 == 1))
+visits$tuesday.visits <- parallel::mclapply(1:length(visits$visits),
+                                          function(x)
+                                          sum((as.integer(unlist(visits$visits[[x]]))) %% 7 == 2))
+visits$wednesday.visits <- parallel::mclapply(1:length(visits$visits),
+                                          function(x)
+                                          sum((as.integer(unlist(visits$visits[[x]]))) %% 7 == 3))
+visits$thursday.visits <- parallel::mclapply(1:length(visits$visits),
+                                          function(x)
+                                          sum((as.integer(unlist(visits$visits[[x]]))) %% 7 == 4))
+visits$friday.visits <- parallel::mclapply(1:length(visits$visits),
+                                          function(x)
+                                          sum((as.integer(unlist(visits$visits[[x]]))) %% 7 == 5))
+visits$saturday.visits <- parallel::mclapply(1:length(visits$visits),
+                                          function(x)
+                                          sum((as.integer(unlist(visits$visits[[x]]))) %% 7 == 6))
+visits$sunday.visits <- parallel::mclapply(1:length(visits$visits),
+                                          function(x)
+                                          sum((as.integer(unlist(visits$visits[[x]]))) %% 7 == 0))
+visits$max.gap <- parallel::mclapply(1:length(visits$visits),
+                                     function(x)
+                                     max(diff((as.integer(unlist(visits$visits[[x]]))))))
+visits$min.gap <- parallel::mclapply(1:length(visits$visits),
+                                     function(x)
+                                     min(diff((as.integer(unlist(visits$visits[[x]]))))))
+visits[, 3:12] <- as.integer(unlist(visits[ , 3:12]))
+```
+
+## Distribution of visits
+It's interesting to see how many visits one has made in the span of the 143 weeks. 
+
+```{r Distribution of visits, echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(data = visits[, -2], aes(x = total.visits)) + 
+  geom_density(fill = "#B5D6E7") + 
+  ggtitle('Distribution of visits') +
+  geom_vline(xintercept = mean(visits$total.visits), color = '#DB6839') +
+  geom_text(aes(x = mean(visits$total.visits), y = 0, label = 'Mean'), angle = 0, hjust = 0) +
+  geom_vline(xintercept = median(visits$total.visits), color = '#84C5AF') +
+  geom_text(aes(x = median(visits$total.visits), y = 0, label = 'Median'), angle = 0, hjust = 1) +
+  xlab('Visits') + 
+  ylab('Density') +
+  theme_minimal()
+```
+
+## Visits over the days of the week
+A shopping mall typically will have a rush over the weekends. Let's see if that hypothesis is true in our case.
+```{r Frequency of visits by the day of week, echo=FALSE, message=FALSE, warning=FALSE}
+frequency.by.day <- data.frame(day.of.week = c(colnames(visits[ , 4:10])), 
+                               frequency = c(sum(visits$monday.visits), 
+                                             sum(visits$tuesday.visits),
+                                             sum(visits$wednesday.visits),
+                                             sum(visits$thursday.visits),
+                                             sum(visits$friday.visits),
+                                             sum(visits$saturday.visits),
+                                             sum(visits$sunday.visits)))
+ggplot(data = frequency.by.day, aes(x = reorder(day.of.week, frequency), y = frequency, fill = factor(day.of.week, levels = (frequency.by.day$day.of.week)))) +
+geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Greens") +
+  xlab('visits by day') +
+  theme(legend.position = "none")
+```
+The visits on Saturday and Sunday are higher by ~40% than any other day. It'll be important to have this as a feature in our model later on.
+
+## Interval between visits
+Understanding the typical gap between visits of a customer can be a crucial indicator to predicting the next visit of a customer. The below shows the distribution of customers' interval between visits. We can take the 95 percentile cut-off as the number of days (recent) to train our model instead of the entirety of the data-set.
+
+```{r Distribution of maximum interval between visits, echo=FALSE, message=FALSE, warning=FALSE}
+percentile.95 <- quantile(visits$max.gap, 0.95)
+percentile.997 <- quantile(visits$max.gap, 0.997)
+ggplot(data = visits[ , -2], aes(x = max.gap)) + 
+  geom_density(fill = "#33CCCC") +
+  ggtitle("Maximum interval between visits") +
+  geom_vline(xintercept = percentile.95, color = "#0000CC") +
+  geom_text(aes(x = percentile.95, y = 0, label = '.95'), angle = 0, hjust = 0) +
+  geom_vline(xintercept = percentile.997, color = "#000099") +
+  geom_text(aes(x = percentile.997, y = 0, label = '.997'), angle = 0, hjust = 0) +
+  theme_minimal()
+```
+If you take the 99 percentile, you'll capture most gap in the customer behavior. You capture enough customers in the 95 percentile as well. If you're training your model, it's sufficient to choose the most recent 12-18 weeks (86 - 132 days from the percentile marks above) of data points.
+
+# Feature engineering
+The next stages will involve transforming the data into a format usable for modeling and create some interesting features that might explain a customer visit pattern.
+
+## Making a usable data frame
+The current data is not easy to understand for the computer. Let's first make it into a usable data frame. From the above table, you can notice that there is leading white-space followed by a set of numbers separated by a space. Since we have to do this 300000 times, let's use the capability of all the cores to speed this up a little bit.
+
+```{r Making data usable, echo=FALSE, message=FALSE, warning=FALSE}
+visits <- readRDS('data/visits.Rds')
+visits$visits <- trimws(as.character(visits$visits))
+visitsList <- parallel::mclapply(1:length(visits$visits), 
+                                 function(x)
+                                   as.integer(unlist(strsplit(visits$visits[x], " "))),
+                                 mc.cores = parallel::detectCores())
+dfOfVisitsList <- parallel::mclapply(1:length(visits$visits), 
+                                     function(x)
+                                       data.frame(x,visitsList[[x]]), 
+                                     mc.cores = parallel::detectCores())
+visits <- do.call("rbind", dfOfVisitsList)
+colnames(visits) <- c("visitor.id", "visit.day")
+rm(dfOfVisitsList, visitsList)
+head(visits)
+```
+
+## Days of the week
+Let's convert the raw numbers to something more meaningful. Each day number is available to us. Let's create some interesting features - 
+1. Day of the week
+2. Week number
+3. Binary to indicate which day of the week a visit happened
+
+```{r Days of the week, echo=FALSE, message=FALSE, warning=FALSE}
+visits$day.of.week <- as.integer(parallel::mclapply(visits$visit.day, 
+                                                    function(x) x %% 7, 
+                                                    mc.cores = parallel::detectCores()))
+visits$day.of.week[visits$day.of.week==0] <- as.integer(7)
+visits$week.number <- as.integer(floor((visits$visit.day - 1) / 7) + 1)
+dummy.days <- fastDummies::dummy_cols(visits$day.of.week)[,-1]
+colnames(dummy.days) <- c("Tue", "Sun", "Thu", "Sat", "Mon", "Fri", "Wed")
+visits <- data.frame(visits, dummy.days)
+rm(dummy.days)
+head(visits)
+```
+
+## Visit patterns
+While exploring the data we found that weekends visits are considerable higher than weekdays. We want to understand how over time a customer visit pattern changes. It makes sense to look at the level of data at a customer-week level. Doing so will increase the size of the data substantially. So far looking at the data, all columns are numbers - no decimals. We can keep them as integers instead of numeric to save some memory.
+
+We'll derive the next set of features - 
+1. Visits by week-day level
+2. Non-visits data - We'll have to remove non-visits of a customer before he first visited. We wouldn't want our model to learn that.
+3. Total visits in a week
+4. Cumulative frequency of visits at a customer week level
+
+```{r Week wise data, echo=FALSE, message=FALSE, warning=FALSE}
+visits <- visits %>%
+  group_by(visitor.id, week.number) %>%
+  summarise(Mon = sum(Mon), 
+            Tue = sum(Tue),
+            Wed = sum(Wed),
+            Thu = sum(Thu),
+            Fri = sum(Fri),
+            Sat = sum(Sat),
+            Sun = sum(Sun))
+#non visit data
+complete.visits <- data.frame(visitor.id = rep(1:300000, 143), week.number = rep(1:143, 300000))
+complete.visits <- dplyr::full_join(complete.visits, visits, by = c('visitor.id', 'week.number'))
+complete.visits[is.na(complete.visits)] <- 0
+#visits per week
+complete.visits$total.visits.in.week <- rowSums(complete.visits[,3:9])
+complete.visits <- dplyr::mutate_all(complete.visits, 
+                                     function(x) as.integer(x))
+complete.visits <- as.data.frame(complete.visits)
+complete.visits <- complete.visits[with(complete.visits, order(visitor.id, week.number)), ]
+#frequency
+complete.visits <- complete.visits %>%
+  group_by(visitor.id) %>%
+  mutate(frequency = cumsum(total.visits.in.week))
+#remove visits before he first came
+complete.visits <- complete.visits %>%
+  filter(frequency != 0)
+#any visit that ever happened
+complete.visits$any.visit[complete.visits$total.visits.in.week>0] <- as.integer(1)
+complete.visits[is.na(complete.visits)] <- as.integer(0)
+#no visits
+complete.visits$no.visit <- as.integer(1 - complete.visits$any.visit)
+rm(visits)
+gc()
+head(complete.visits)
+```
+
+## Proportions of visits, non-visits, gap
+Customers are likely to spike their visits to a shopping mall on weekends. Using the above let's look at how the proportions of visits have been changing with respect to days of the week. Understanding the inter visit interval is also important to understand when one is likely to visit.
+
+Key features below - 
+1. Weeks since the last visit
+2. Total visits/non-visits by day of the week
+3. Proportions of visits by day of the week
+
+```{r Proportions, echo=FALSE, message=FALSE, warning=FALSE}
+#weeks since prev visit
+complete.visits$weeks.since.visit <- sequence(rle((complete.visits$any.visit))$lengths)
+complete.visits$weeks.since.visit <- complete.visits$weeks.since.visit - complete.visits$any.visit
+#total day of week
+complete.visits <- complete.visits %>%
+  group_by(visitor.id) %>%
+  mutate(Tot.Mon = cumsum(Mon), 
+         Tot.Tue = cumsum(Tue),
+         Tot.Wed = cumsum(Wed),
+         Tot.Thu = cumsum(Thu),
+         Tot.Fri = cumsum(Fri),
+         Tot.Sat = cumsum(Sat),
+         Tot.Sun = cumsum(Sun),
+         Tot.no.visit = cumsum(no.visit))
+#proportions of visits
+complete.visits$prop.no.visit <- round(complete.visits$Tot.no.visit / (complete.visits$frequency +
+                                                                   complete.visits$Tot.no.visit), 2)
+complete.visits$prop.Sun <- round(complete.visits$Tot.Sun / complete.visits$frequency, 2)
+complete.visits$prop.Mon <- round(complete.visits$Tot.Mon / complete.visits$frequency, 2)
+complete.visits$prop.Tue <- round(complete.visits$Tot.Tue / complete.visits$frequency, 2)
+complete.visits$prop.Wed <- round(complete.visits$Tot.Wed / complete.visits$frequency, 2)
+complete.visits$prop.Thu <- round(complete.visits$Tot.Thu / complete.visits$frequency, 2)
+complete.visits$prop.Fri <- round(complete.visits$Tot.Fri / complete.visits$frequency, 2)
+complete.visits$prop.Sat <- round(complete.visits$Tot.Sat / complete.visits$frequency, 2)
+saveRDS(complete.visits, "data/complete.visits.ads.Rds")
+head(complete.visits)
+```
+
+# Next steps
+Now that we have a complete data-set we'll use the cut-off from the maximum visit interval to define my training period and build a model. We'll keep the modeling exercise in another notebook.
