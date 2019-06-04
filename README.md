@@ -5,10 +5,6 @@ The day with index 1 is a Monday (7 is a Sunday, 8 is again a Monday). Indices a
 
 For instance, if a customer will visit the mall on a Wednesday, then the model should predict 3. 
 
-# Notebooks
-* [Feature engineering](../blob/master/Customer Visits - A feature generation exercise.Rmd)
-* [Modeling](../blob/master/Customer Visits - Prediction iterations.Rmd)
-
 # Remarks
 This problem is interesting since the crux of the exercise is feature engineering. The journey of taking the problem from 
 ![raw_data](images/raw.png "Raw data")
