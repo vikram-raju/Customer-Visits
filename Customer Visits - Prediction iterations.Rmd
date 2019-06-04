@@ -1,0 +1,384 @@
+---
+title: "Customer Visits - Predicting next visit"
+date: "April, 2019"
+output: 
+  html_document:
+    theme: cosmo
+    code_folding: hide
+    toc: yes
+    toc_float: true
+    toc_depth: 6
+    number_sections: false
+    fig_width: 8
+---
+
+# Model building
+We saw some interesting insights from the EDA exercise. We'll continue on that to build our model to predict the next visit.
+
+```{r Read Data, echo=FALSE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+visits <- readRDS('data/complete.visits.ads.Rds')
+head(visits)
+```
+
+# Selecting data for modeling
+We say that the 95 percentile of visits is captured with 12 weeks. So we can use only the final 12 weeks of data to train our model to predict the next week visits. To cross validate we'll use a rolling window strategy - 
+* Train on week 128 - week 139, test on week 140
+* Train on week 129 - week 140, test on week 141
+* Train on week 130 - week 141, test on week 142
+* Train on week 131 - week 142, test on week 143
+
+```{r Sliding window datasets, echo=FALSE, message=FALSE, warning=FALSE}
+visits$labels <- ifelse(visits$Mon==1, "Monday",
+                        ifelse(visits$Tue==1, "Tuesday",
+                               ifelse(visits$Wed==1, "Wednesday",
+                                      ifelse(visits$Thu==1, "Thursday",
+                                             ifelse(visits$Fri==1, "Friday",
+                                                    ifelse(visits$Sat==1, "Saturday",
+                                                           ifelse(visits$Sun==1, "Sunday", "No Visit")))))))
+train128139 <- visits %>% filter(week.number >= 128 & week.number <= 139)
+test140 <- visits %>% filter(week.number==140)
+
+train129140 <- visits %>% filter(week.number >= 129 & week.number <= 140)
+test141 <- visits %>% filter(week.number==141)
+
+train130141 <- visits %>% filter(week.number >= 130 & week.number <= 141)
+test142 <- visits %>% filter(week.number==142)
+
+train131142 <- visits %>% filter(week.number >= 131 & week.number <= 142)
+test143 <- visits %>% filter(week.number==143)
+
+classification.error <- function(conf.mat) {
+  conf.mat = as.matrix(conf.mat)
+  error = 1 - sum(diag(conf.mat)) / sum(conf.mat)
+  return (error)
+}
+
+ggplotConfusionMatrix <- function(cm){
+  mytitle <- paste("Accuracy", scales::percent_format()(cm$overall[1]),
+                   "Kappa", scales::percent_format()(cm$overall[2]))
+  plot.cm <- ggplot(data = as.data.frame(cm$table),
+                    aes(x = Reference, y = Prediction)) +
+    geom_tile(aes(fill = log(Freq)), colour = "white") +
+    scale_fill_gradient(low = "white", high = "green") +
+    geom_text(aes(x = Reference, y = Prediction, label = Freq)) +
+    theme(legend.position = "none") +
+    ggtitle(mytitle)
+  return (plot.cm)
+}
+
+rm(visits)
+gc()
+```
+
+# Model building
+We'll build a multiclass (8) classifier for this time period and see how well it performs. To make labels usable with our xgboost package, we'll encode as factor variables.
+
+## Train on week 128 - week 139, test on week 140
+
+```{r XGBoost Classifier I, echo=FALSE, message=FALSE, warning=FALSE}
+train.data <- train128139[,c(10:12,13:31)]
+val.data <- test140[,c(10:12,13:31)]
+train.data$labels <- factor(train.data$labels, 
+                               levels = c("No Visit", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+val.data$labels <- factor(val.data$labels,
+                          levels = c("No Visit", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+train.labs <- as.numeric(train.data$labels) - 1
+val.labs <- as.numeric(val.data$labels) - 1
+
+xgb.train <- xgboost::xgb.DMatrix(data = model.matrix(~ . + 0, 
+                                                      data = train.data[, -22]), 
+                                  label = train.labs)
+xgb.val <- xgboost::xgb.DMatrix(data = model.matrix(~ . + 0,
+                                                    data = val.data[ , -22]), 
+                                label = val.labs)
+
+params <- list(booster = "gbtree", 
+                              objective = "multi:softprob", 
+                              num_class = 8, 
+                              eval_metric = "mlogloss")
+xgbcv <- xgboost::xgb.cv(params = params, 
+                data = xgb.train, 
+                nrounds = 50, 
+                nfold = 5, 
+                showsd = TRUE, 
+                stratified = TRUE, 
+                print_every_n = 10, 
+                early_stop_round = 20, 
+                maximize = FALSE, 
+                prediction = TRUE)
+
+xgb.train.preds <- data.frame(xgbcv$pred) %>% 
+                    mutate(max = max.col(., ties.method = "last"), 
+                           label = train.labs + 1)
+```
+
+### Confusion matrix and model summary - Training
+
+
+```{r Confusion matrix and model summary - Training, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.conf.mat <- table(true = train.labs + 1, pred = xgb.train.preds$max)
+cat("XGB Training Classification Error Rate:", classification.error(xgb.conf.mat), "\n")
+xgb.conf.mat.2 <- caret::confusionMatrix(factor(xgb.train.preds$label),
+                                  factor(xgb.train.preds$max),
+                                  mode = "everything")
+
+ggplotConfusionMatrix(xgb.conf.mat.2)
+```
+
+### Confusion matrix and model summary - Validation
+
+```{r Confusion matrix and model summary - Validation, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.model <- xgboost::xgb.train(params = params, data = xgb.train, nrounds = 50)
+xgb.val.preds <- predict(xgb.model, newdata = xgb.val)
+xgb.val.out <- matrix(xgb.val.preds, 
+                      nrow = 8, 
+                      ncol = length(xgb.val.preds) / 8) %>% 
+               t() %>%
+               data.frame() %>%
+               mutate(max = max.col(., ties.method = "last"), 
+                      label = val.labs + 1) 
+
+xgb.val.conf <- table(true = val.labs + 1, 
+                      pred = xgb.val.out$max)
+
+cat("XGB Validation Classification Error Rate:", classification.error(xgb.val.conf), "\n")
+
+xgb.val.conf2 <- caret::confusionMatrix(factor(xgb.val.out$label),
+                                 factor(xgb.val.out$max),
+                                 mode = "everything")
+ggplotConfusionMatrix(xgb.val.conf2)
+```
+
+## Train on week 129 - week 140, test on week 141
+
+```{r XGBoost Classifier II, echo=FALSE, message=FALSE, warning=FALSE}
+train.data <- train129140[,c(10:12,13:31)]
+val.data <- test141[,c(10:12,13:31)]
+train.data$labels <- factor(train.data$labels, 
+                               levels = c("No Visit", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+val.data$labels <- factor(val.data$labels,
+                          levels = c("No Visit", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+train.labs <- as.numeric(train.data$labels) - 1
+val.labs <- as.numeric(val.data$labels) - 1
+
+xgb.train <- xgboost::xgb.DMatrix(data = model.matrix(~ . + 0, 
+                                                      data = train.data[, -22]), 
+                                  label = train.labs)
+xgb.val <- xgboost::xgb.DMatrix(data = model.matrix(~ . + 0,
+                                                    data = val.data[, -22]), 
+                                label = val.labs)
+
+params <- list(booster = "gbtree", 
+                              objective = "multi:softprob", 
+                              num_class = 8, 
+                              eval_metric = "mlogloss")
+xgbcv <- xgboost::xgb.cv(params = params, 
+                data = xgb.train, 
+                nrounds = 50, 
+                nfold = 5, 
+                showsd = TRUE, 
+                stratified = TRUE, 
+                print_every_n = 10, 
+                early_stop_round = 20, 
+                maximize = FALSE, 
+                prediction = TRUE)
+
+xgb.train.preds <- data.frame(xgbcv$pred) %>% 
+                    mutate(max = max.col(., ties.method = "last"), 
+                           label = train.labs + 1)
+```
+
+### Confusion matrix and model summary - Training
+
+
+```{r Confusion matrix and model summary - Training II, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.conf.mat <- table(true = train.labs + 1, pred = xgb.train.preds$max)
+cat("XGB Training Classification Error Rate:", classification.error(xgb.conf.mat), "\n")
+xgb.conf.mat.2 <- caret::confusionMatrix(factor(xgb.train.preds$label),
+                                  factor(xgb.train.preds$max),
+                                  mode = "everything")
+
+ggplotConfusionMatrix(xgb.conf.mat.2)
+```
+
+### Confusion matrix and model summary - Validation
+
+```{r Confusion matrix and model summary - Validation II, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.model <- xgboost::xgb.train(params = params, data = xgb.train, nrounds = 50)
+xgb.val.preds <- predict(xgb.model, newdata = xgb.val)
+xgb.val.out <- matrix(xgb.val.preds, 
+                      nrow = 8, 
+                      ncol = length(xgb.val.preds) / 8) %>% 
+               t() %>%
+               data.frame() %>%
+               mutate(max = max.col(., ties.method = "last"), 
+                      label = val.labs + 1) 
+
+xgb.val.conf <- table(true = val.labs + 1, 
+                      pred = xgb.val.out$max)
+
+cat("XGB Validation Classification Error Rate:", classification.error(xgb.val.conf), "\n")
+
+xgb.val.conf2 <- caret::confusionMatrix(factor(xgb.val.out$label),
+                                 factor(xgb.val.out$max),
+                                 mode = "everything")
+ggplotConfusionMatrix(xgb.val.conf2)
+```
+
+## Train on week 130 - week 141, test on week 142
+
+```{r XGBoost Classifier III, echo=FALSE, message=FALSE, warning=FALSE}
+train.data <- train130141[,c(10:12,13:31)]
+val.data <- test142[,c(10:12,13:31)]
+train.data$labels <- factor(train.data$labels, 
+                               levels = c("No Visit", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+val.data$labels <- factor(val.data$labels,
+                          levels = c("No Visit", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+train.labs <- as.numeric(train.data$labels) - 1
+val.labs <- as.numeric(val.data$labels) - 1
+
+xgb.train <- xgboost::xgb.DMatrix(data = model.matrix(~ . + 0, 
+                                                      data = train.data[, -22]), 
+                                  label = train.labs)
+xgb.val <- xgboost::xgb.DMatrix(data = model.matrix(~ . + 0,
+                                                    data = val.data[, -22]), 
+                                label = val.labs)
+
+params <- list(booster = "gbtree", 
+                              objective = "multi:softprob", 
+                              num_class = 8, 
+                              eval_metric = "mlogloss")
+xgbcv <- xgboost::xgb.cv(params = params, 
+                data = xgb.train, 
+                nrounds = 50, 
+                nfold = 5, 
+                showsd = TRUE, 
+                stratified = TRUE, 
+                print_every_n = 10, 
+                early_stop_round = 20, 
+                maximize = FALSE, 
+                prediction = TRUE)
+
+xgb.train.preds <- data.frame(xgbcv$pred) %>% 
+                    mutate(max = max.col(., ties.method = "last"), 
+                           label = train.labs + 1)
+```
+
+### Confusion matrix and model summary - Training
+
+
+```{r Confusion matrix and model summary - Training III, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.conf.mat <- table(true = train.labs + 1, pred = xgb.train.preds$max)
+cat("XGB Training Classification Error Rate:", classification.error(xgb.conf.mat), "\n")
+xgb.conf.mat.2 <- caret::confusionMatrix(factor(xgb.train.preds$label),
+                                  factor(xgb.train.preds$max),
+                                  mode = "everything")
+
+ggplotConfusionMatrix(xgb.conf.mat.2)
+```
+
+### Confusion matrix and model summary - Validation
+
+```{r Confusion matrix and model summary - Validation III, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.model <- xgboost::xgb.train(params = params, data = xgb.train, nrounds = 50)
+xgb.val.preds <- predict(xgb.model, newdata = xgb.val)
+xgb.val.out <- matrix(xgb.val.preds, 
+                      nrow = 8, 
+                      ncol = length(xgb.val.preds) / 8) %>% 
+               t() %>%
+               data.frame() %>%
+               mutate(max = max.col(., ties.method = "last"), 
+                      label = val.labs + 1) 
+
+xgb.val.conf <- table(true = val.labs + 1, 
+                      pred = xgb.val.out$max)
+
+cat("XGB Validation Classification Error Rate:", classification.error(xgb.val.conf), "\n")
+
+xgb.val.conf2 <- caret::confusionMatrix(factor(xgb.val.out$label),
+                                 factor(xgb.val.out$max),
+                                 mode = "everything")
+ggplotConfusionMatrix(xgb.val.conf2)
+```
+
+## Train on week 131 - week 142, test on week 143
+
+```{r XGBoost Classifier IV, echo=FALSE, message=FALSE, warning=FALSE}
+train.data <- train131142[,c(10:12,13:31)]
+val.data <- test143[,c(10:12,13:31)]
+train.data$labels <- factor(train.data$labels, 
+                               levels = c("No Visit", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+val.data$labels <- factor(val.data$labels,
+                          levels = c("No Visit", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+train.labs <- as.numeric(train.data$labels) - 1
+val.labs <- as.numeric(val.data$labels) - 1
+
+xgb.train <- xgboost::xgb.DMatrix(data = model.matrix(~ . + 0, 
+                                                      data = train.data[, -22]), 
+                                  label = train.labs)
+xgb.val <- xgboost::xgb.DMatrix(data = model.matrix(~ . + 0,
+                                                    data = val.data[, -22]), 
+                                label = val.labs)
+
+params <- list(booster = "gbtree", 
+                              objective = "multi:softprob", 
+                              num_class = 8, 
+                              eval_metric = "mlogloss")
+xgbcv <- xgboost::xgb.cv(params = params, 
+                data = xgb.train, 
+                nrounds = 50, 
+                nfold = 5, 
+                showsd = TRUE, 
+                stratified = TRUE, 
+                print_every_n = 10, 
+                early_stop_round = 20, 
+                maximize = FALSE, 
+                prediction = TRUE)
+
+xgb.train.preds <- data.frame(xgbcv$pred) %>% 
+                    mutate(max = max.col(., ties.method = "last"), 
+                           label = train.labs + 1)
+```
+
+### Confusion matrix and model summary - Training
+
+
+```{r Confusion matrix and model summary - Training IV, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.conf.mat <- table(true = train.labs + 1, pred = xgb.train.preds$max)
+cat("XGB Training Classification Error Rate:", classification.error(xgb.conf.mat), "\n")
+xgb.conf.mat.2 <- caret::confusionMatrix(factor(xgb.train.preds$label),
+                                  factor(xgb.train.preds$max),
+                                  mode = "everything")
+
+ggplotConfusionMatrix(xgb.conf.mat.2)
+```
+
+### Confusion matrix and model summary - Validation
+
+```{r Confusion matrix and model summary - Validation IV, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.model <- xgboost::xgb.train(params = params, data = xgb.train, nrounds = 50)
+xgb.val.preds <- predict(xgb.model, newdata = xgb.val)
+xgb.val.out <- matrix(xgb.val.preds, 
+                      nrow = 8, 
+                      ncol = length(xgb.val.preds) / 8) %>% 
+               t() %>%
+               data.frame() %>%
+               mutate(max = max.col(., ties.method = "last"), 
+                      label = val.labs + 1) 
+
+xgb.val.conf <- table(true = val.labs + 1, 
+                      pred = xgb.val.out$max)
+
+cat("XGB Validation Classification Error Rate:", classification.error(xgb.val.conf), "\n")
+
+xgb.val.conf2 <- caret::confusionMatrix(factor(xgb.val.out$label),
+                                 factor(xgb.val.out$max),
+                                 mode = "everything")
+ggplotConfusionMatrix(xgb.val.conf2)
+```
+
+# Notes
+We can see accuracy at training and validation to be consistant (~62%) across all iterations. This method is resource heavy, but has proven to give good results as opposed to the models scoring at an aggregated level. The xgboost package training in parallel speeds up this process quite a bit.
