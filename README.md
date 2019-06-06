@@ -8,7 +8,9 @@ For instance, if a customer will visit the mall on a Wednesday, then the model s
 # Remarks
 This problem is interesting since the crux of the exercise is feature engineering. The journey of taking the problem from 
 ![raw_data](images/raw.png "Raw data")
+
 to
+
 ![engg_data](images/enggdata.png "Feature engineered data")
 
 Secondly, when you do the above, the data set becomes extremely heavy. Making use of your hardware to the max is important.
