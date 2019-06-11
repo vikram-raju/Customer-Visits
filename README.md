@@ -1,3 +1,5 @@
+Found a very interesting dataset on Kaggle on ![customer visits](https://www.kaggle.com/hassanaftab/customer-visits-data) predicition of a shopping mall. 
+
 # Customer-Visits
 The data-set provides information about shopping mall visits of 300k customers over the course of 143 weeks. Each line represents one customer - the first column contains a unique customer identifier and the second column contains a vector of the day numbers he/she visited the mall. 
 
