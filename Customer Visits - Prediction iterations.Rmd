@@ -24,7 +24,7 @@ head(visits)
 ```
 
 # Selecting data for modeling
-We say that the 95 percentile of visits is captured with 12 weeks. So we can use only the final 12 weeks of data to train our model to predict the next week visits. To cross validate we'll use a rolling window strategy - 
+We say that the 95th percentile of visits is captured with 12 weeks. So we can use only the final 12 weeks of data to train our model to predict the next week visits. To cross validate we'll use a rolling window strategy - 
 * Train on week 128 - week 139, test on week 140
 * Train on week 129 - week 140, test on week 141
 * Train on week 130 - week 141, test on week 142
