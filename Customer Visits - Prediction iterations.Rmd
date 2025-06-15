@@ -106,7 +106,7 @@ xgbcv <- xgboost::xgb.cv(params = params,
                 showsd = TRUE, 
                 stratified = TRUE, 
                 print_every_n = 10, 
-                early_stop_round = 20, 
+                early_stopping_rounds = 20, 
                 maximize = FALSE, 
                 prediction = TRUE)
 
@@ -182,7 +182,7 @@ xgbcv <- xgboost::xgb.cv(params = params,
                 showsd = TRUE, 
                 stratified = TRUE, 
                 print_every_n = 10, 
-                early_stop_round = 20, 
+                early_stopping_rounds = 20, 
                 maximize = FALSE, 
                 prediction = TRUE)
 
@@ -258,7 +258,7 @@ xgbcv <- xgboost::xgb.cv(params = params,
                 showsd = TRUE, 
                 stratified = TRUE, 
                 print_every_n = 10, 
-                early_stop_round = 20, 
+                early_stopping_rounds = 20, 
                 maximize = FALSE, 
                 prediction = TRUE)
 
@@ -334,7 +334,7 @@ xgbcv <- xgboost::xgb.cv(params = params,
                 showsd = TRUE, 
                 stratified = TRUE, 
                 print_every_n = 10, 
-                early_stop_round = 20, 
+                early_stopping_rounds = 20, 
                 maximize = FALSE, 
                 prediction = TRUE)
 
